@@ -8,6 +8,7 @@ import aio_pika
 import socket
 import sys
 import os
+import fnmatch
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -146,6 +147,119 @@ class UniversalContext(commands.Context):
         return await super().send(content, **kwargs)
 
 
+class InMemoryCache:
+    def __init__(self):
+        self.kv = {}
+        self.hash_kv = {}
+        self.set_kv = {}
+        self.zset_kv = {}
+
+    async def init_db(self):
+        return None
+
+    async def close(self):
+        return None
+
+    async def get(self, key):
+        return self.kv.get(key)
+
+    async def set(self, key, value):
+        self.kv[key] = str(value)
+
+    async def setex(self, name, time, value):
+        await self.set(name, value)
+
+    async def delete(self, key):
+        self.kv.pop(key, None)
+        self.hash_kv.pop(key, None)
+        self.set_kv.pop(key, None)
+        self.zset_kv.pop(key, None)
+
+    async def incr(self, key, amount=1):
+        try:
+            current = int(self.kv.get(key, "0"))
+        except (TypeError, ValueError):
+            current = 0
+        new_val = current + amount
+        self.kv[key] = str(new_val)
+        return new_val
+
+    async def hset(self, name, key, value):
+        self.hash_kv.setdefault(name, {})[str(key)] = str(value)
+
+    async def hget(self, name, key):
+        return self.hash_kv.get(name, {}).get(str(key))
+
+    async def hexists(self, name, key):
+        return str(key) in self.hash_kv.get(name, {})
+
+    async def hdel(self, name, key):
+        h = self.hash_kv.get(name, {})
+        if str(key) in h:
+            del h[str(key)]
+            return True
+        return False
+
+    async def hgetall(self, name):
+        return dict(self.hash_kv.get(name, {}))
+
+    async def sadd(self, name, *values):
+        s = self.set_kv.setdefault(name, set())
+        before = len(s)
+        for value in values:
+            s.add(str(value))
+        return len(s) - before
+
+    async def srem(self, name, *values):
+        s = self.set_kv.get(name, set())
+        removed = 0
+        for value in values:
+            v = str(value)
+            if v in s:
+                s.remove(v)
+                removed += 1
+        return removed
+
+    async def smembers(self, name):
+        return set(self.set_kv.get(name, set()))
+
+    async def sismember(self, name, value):
+        return str(value) in self.set_kv.get(name, set())
+
+    async def zscore(self, name, member):
+        return self.zset_kv.get(name, {}).get(str(member))
+
+    async def zrevrank(self, name, member):
+        z = self.zset_kv.get(name, {})
+        ordered = sorted(z.items(), key=lambda x: (x[1], x[0]), reverse=True)
+        target = str(member)
+        for idx, (m, _score) in enumerate(ordered):
+            if m == target:
+                return idx
+        return None
+
+    async def zincrby(self, name, amount, member):
+        z = self.zset_kv.setdefault(name, {})
+        m = str(member)
+        z[m] = float(z.get(m, 0.0)) + float(amount)
+        return z[m]
+
+    async def zrevrange(self, name, start, end, withscores=False):
+        z = self.zset_kv.get(name, {})
+        ordered = sorted(z.items(), key=lambda x: (x[1], x[0]), reverse=True)
+        selected = ordered[start:] if end == -1 else ordered[start : end + 1]
+        if withscores:
+            return selected
+        return [m for m, _score in selected]
+
+    async def keys(self, pattern="*"):
+        all_keys = set(self.kv.keys())
+        all_keys.update(self.hash_kv.keys())
+        all_keys.update(self.set_kv.keys())
+        all_keys.update(self.zset_kv.keys())
+        return [k for k in all_keys if fnmatch.fnmatch(k, pattern)]
+
+
 class MyBot(commands.AutoShardedBot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -167,8 +281,13 @@ class MyBot(commands.AutoShardedBot):
 
         # Store database cache natively
         self.db = cache
-        await self.db.init_db()
-        print("✅ Initialized Postgres database pool.")
+        try:
+            await self.db.init_db()
+            print("✅ Initialized Postgres database pool.")
+        except Exception as e:
+            print(f"⚠️ Postgres unavailable, falling back to in-memory cache: {e}")
+            self.db = InMemoryCache()
+            await self.db.init_db()
 
         # Load only explicitly allowed cogs.
         for extension in sorted(self.allowed_cog_extensions):
