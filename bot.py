@@ -277,4 +277,13 @@ async def on_ready():
 # Removed obsolete !setname command (Now handled by OnboardingView above)
 
 if __name__ == "__main__":
-    bot.run(os.getenv("DISCORD_TOKEN"))
+    token = (os.getenv("DISCORD_TOKEN") or "").strip()
+
+    # Accept accidental "Bot <token>" format from copied auth headers.
+    if token.lower().startswith("bot "):
+        token = token[4:].strip()
+
+    if not token:
+        raise RuntimeError("DISCORD_TOKEN is missing or empty in environment/.env")
+
+    bot.run(token)
