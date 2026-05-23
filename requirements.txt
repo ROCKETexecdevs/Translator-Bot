@@ -1,0 +1,6 @@
+discord.py[voice]
+google-genai
+python-dotenv
+aio-pika
+asyncpg
+deep-translator
