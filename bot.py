@@ -25,12 +25,13 @@ ALLOWED_COG_EXTENSIONS = {
 
 def enforce_single_instance():
     global _lock_socket
+    lock_port = int(os.getenv("BOT_LOCK_PORT", "17690"))
     _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        _lock_socket.bind(("127.0.0.1", 17690))
+        _lock_socket.bind(("127.0.0.1", lock_port))
     except socket.error:
         print(
-            "❌ Another instance of the bot is already running. Exiting to prevent ghost instances."
+            f"❌ Another instance is already using lock port {lock_port}. Exiting to prevent ghost instances."
         )
         sys.exit(1)
 
