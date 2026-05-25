@@ -17,6 +17,7 @@ load_dotenv()
 ALLOWED_COG_EXTENSIONS = {
     "cogs.admin",
     "cogs.global_chat",
+    "cogs.help",
     "cogs.moderation",
     "cogs.quick_translator",
 }
