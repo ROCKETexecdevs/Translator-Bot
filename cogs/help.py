@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from cogs.utils.views import TranslatedView
+from types import SimpleNamespace
 
 # Friendly metadata for the bot's cogs
 COG_METADATA = {
@@ -206,9 +207,8 @@ async def get_command_embed(bot, command, ctx):
 
 
 class HelpSelect(discord.ui.Select):
-    def __init__(self, bot, ctx):
+    def __init__(self, bot):
         self.bot = bot
-        self.ctx = ctx
         
         options = [
             discord.SelectOption(
@@ -225,7 +225,7 @@ class HelpSelect(discord.ui.Select):
                 
             visible_commands = []
             for cmd in cog.get_commands():
-                if cmd.hidden and not ctx.author.guild_permissions.administrator:
+                if cmd.hidden:
                     continue
                 visible_commands.append(cmd)
                 
@@ -259,15 +259,11 @@ class HelpSelect(discord.ui.Select):
         )
         
     async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.ctx.author.id:
-            return await interaction.response.send_message(
-                "❌ You cannot navigate this menu. Only the user who ran the command can use it.",
-                ephemeral=True
-            )
-            
+        ctx_like = SimpleNamespace(author=interaction.user, guild=interaction.guild)
+
         value = self.values[0]
         if value == "main_menu":
-            embed = get_main_embed(self.bot, self.ctx)
+            embed = get_main_embed(self.bot, ctx_like)
             await self.view.edit_translated(interaction, embed=embed)
         else:
             cog = self.bot.get_cog(value)
@@ -276,32 +272,24 @@ class HelpSelect(discord.ui.Select):
                     "❌ That category is no longer loaded.",
                     ephemeral=True
                 )
-            embed = await get_cog_embed(self.bot, cog, self.ctx)
+            embed = await get_cog_embed(self.bot, cog, ctx_like)
             await self.view.edit_translated(interaction, embed=embed)
 
 
 class HelpDropdownView(TranslatedView):
-    def __init__(self, bot, ctx):
-        super().__init__(timeout=120.0)
+    def __init__(self, bot):
+        super().__init__(timeout=None)
         self.bot = bot
-        self.ctx = ctx
-        self.add_item(HelpSelect(bot, ctx))
-        self.message = None
-        
-    async def on_timeout(self):
-        for child in self.children:
-            if isinstance(child, discord.ui.Select):
-                child.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
+        self.add_item(HelpSelect(bot))
 
 
 class Help(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def cog_load(self):
+        # Re-register persistent dropdown handlers so existing help embeds keep working.
+        self.bot.add_view(HelpDropdownView(self.bot))
         
     @commands.hybrid_command(
         name="help",
@@ -321,9 +309,57 @@ class Help(commands.Cog):
             await ctx.send(embed=embed)
         else:
             embed = get_main_embed(self.bot, ctx)
-            view = HelpDropdownView(self.bot, ctx)
-            msg = await ctx.send(embed=embed, view=view)
-            view.message = msg
+            view = HelpDropdownView(self.bot)
+            await ctx.send(embed=embed, view=view)
+
+    @commands.hybrid_command(
+        name="sethelp",
+        description="Post or move the persistent help embed to a selected channel (admins only)."
+    )
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(channel="Channel where the persistent help embed should be posted")
+    async def set_help_embed(self, ctx, channel: discord.TextChannel = None):
+        """Creates or moves a server-managed help embed message to the target channel."""
+        target_channel = channel or ctx.channel
+        guild_id = ctx.guild.id
+
+        old_channel_id = await self.bot.db.get(f"help_embed_channel:{guild_id}")
+        old_message_id = await self.bot.db.get(f"help_embed_message:{guild_id}")
+
+        if old_channel_id and old_message_id:
+            try:
+                old_channel = ctx.guild.get_channel(int(old_channel_id))
+                if old_channel is not None:
+                    old_message = await old_channel.fetch_message(int(old_message_id))
+                    await old_message.delete()
+            except Exception:
+                pass
+
+        embed = get_main_embed(self.bot, ctx)
+        embed.add_field(
+            name="📘 Need More Details?",
+            value="Use `/help` or `!help` to open the interactive help menu.",
+            inline=False,
+        )
+
+        posted = await target_channel.send(embed=embed, view=HelpDropdownView(self.bot))
+
+        pinned = False
+        try:
+            await posted.pin(reason=f"Persistent help embed set by {ctx.author}")
+            pinned = True
+        except Exception:
+            pinned = False
+
+        await self.bot.db.set(f"help_embed_channel:{guild_id}", str(target_channel.id))
+        await self.bot.db.set(f"help_embed_message:{guild_id}", str(posted.id))
+
+        pin_note = " and pinned" if pinned else ""
+        await ctx.send(
+            f"✅ Persistent help embed posted in {target_channel.mention}{pin_note}."
+        )
 
 
 async def setup(bot):
